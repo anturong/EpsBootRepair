@@ -23,4 +23,11 @@
     <Content Include="tools\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- 启动器铺到 RID 目录的上一层：那里同时躺着 win-x64\ 和 win-x86\，
+       GO.CMD 按 PE 的架构从这两个里挑一个跑。手工往 bin\ 里放会被 clean 抹掉。 -->
+  <Target Name="CopyLauncher" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\GO.CMD"
+          DestinationFolder="$(OutDir)..\" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

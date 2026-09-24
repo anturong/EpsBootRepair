@@ -2,11 +2,17 @@ EPS 引导修复工具 —— 内置工具来源登记
 生成日期: 2026-09-24
 用途: 对应方案第七节。任何一份 exe 出问题，靠这张表回溯到具体来源。
 
-【只保留两颗】
-  工具只做一件事：往 ESP 里铺引导文件。要跑的因此只有 bcdboot 一条命令，
-  外加 diskpart 作为"分配盘符失败"的回退。其余一律不进包：
+【只保留三颗】
+  工具做两件事，按目标磁盘的分区表分两条路 —— 两条都只用系统自带的原生命令：
 
-    bcdboot.exe   写 \EFI\Boot\bootx64.efi、\EFI\Microsoft\Boot\bootmgfw.efi、BCD —— 正面主角
+    GPT/UEFI   bcdboot <系统分区>\Windows /s <ESP> /f UEFI
+    MBR/Legacy bcdboot <系统分区>\Windows /s <活动主分区> /f BIOS
+               bootsect /nt60 <活动主分区> /mbr
+
+    bcdboot.exe   铺 \EFI\Boot\bootx64.efi、\EFI\Microsoft\Boot\bootmgfw.efi、BCD（UEFI），
+                  或 \bootmgr、\Boot\BCD、字体（BIOS）—— 正面主角，两条路都要
+    bootsect.exe  只有 MBR/Legacy 用：/nt60 <目标> /mbr 把引导代码写进分区引导扇区
+                  和磁盘 MBR。不碰文件，所以排在 bcdboot 之后收尾
     diskpart.exe  仅当 SetVolumeMountPoint 挂盘符失败时才用（回退路径）
 
   已移除（各附原因，别再加回来除非需求变了）：
@@ -15,10 +21,12 @@ EPS 引导修复工具 —— 内置工具来源登记
                                   就 0xC0000139 退出、零输出
     bcdedit.exe                   写/删固件(NVRAM)启动项用；那是另一个场景（文件没丢、
                                   只是启动项丢了），本工具不覆盖
-    bootsect.exe                  写 MBR + 分区引导扇区用，那是 Legacy/BIOS 引导；
-                                  本工具只管 UEFI 的 ESP
     DiagnosticDataSettings.dll    当初是为让 BootRec.exe 在精简 PE 里加载起来补的依赖，
                                   BootRec 一走它就没有存在理由
+
+  注：bootsect.exe 曾被移除，理由是"本工具只管 UEFI 的 ESP"。Legacy 分支加进来后
+  那条理由不再成立，故恢复 —— 它是个零依赖的纯 PE，PE 里可靠，是两条命令里更稳的那条
+  （bootrec /fixboot、bootrec /rebuildbcd 都有各自的毛病：前者不可靠，后者是交互式的）。
 
 【x64】来源镜像
   D:\我的备份文件\zh-cn_windows_10_business_editions_version_22h2_updated_oct_2025_x64_dvd_d4e92df7.iso
@@ -27,7 +35,12 @@ EPS 引导修复工具 —— 内置工具来源登记
 
   文件名        架构  字节数   md5
   bcdboot.exe   x64   259584   ccf7583912635e30ebcc20012c30eb1e
+  bootsect.exe  x64   110392   4a59bda770a1683a7bc5a913ea1d74ab
   diskpart.exe  x64   159232   10a9693cfe404504890da7f7e2fded13
+
+  bootsect.exe 这颗例外：它不在 boot.wim 里，取自本机 Windows 10 22H2 的
+  %SystemRoot%\System32\bootsect.exe（内嵌版本 10.0.19041.4522，见下节说明的版本读法）。
+  同理 x86 那颗 SysWOW64 也没有，只能走下面的 10PEx86.wim。
 
 【x86】来源镜像
   D:\RAID_NAS备份\系统备份\启动盘Ventoy\EasyU_v3.7.iso
@@ -35,12 +48,14 @@ EPS 引导修复工具 —— 内置工具来源登记
 
   文件名        架构  字节数   md5
   bcdboot.exe   x86   200704   af770703cc056d74ee3149099fbdcad1
+  bootsect.exe  x86   96264    f65a0ad45dc366674e37f14d8e713cbd
   diskpart.exe  x86   150528   399d6f0d3dae925da5fd614826ef36f4
 
 【内嵌文件版本】(读自 tools\ 下的副本；为什么和挂载 WIM 里读到的不一样见末尾备忘)
   x64  bcdboot  10.0.19041.5438 (WinBuild.160101.0800)
+  x64  bootsect 10.0.19041.4522 (WinBuild.160101.0800)
   x64  diskpart 10.0.19041.3636 (WinBuild.160101.0800)
-  x86  两颗均 10.0.19041.1      (WinBuild.160101.0800)
+  x86  三颗均 10.0.19041.1      (WinBuild.160101.0800)
 
 【许可 / 不要提交进仓库】
   微软的 exe 不可再分发。自用或内部做 PE 盘无所谓；若要公开到 GitHub，

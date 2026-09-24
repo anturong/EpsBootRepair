@@ -28,7 +28,7 @@ namespace EpsBootRepair
     {
         public static readonly string[] Names =
         {
-            "bcdboot.exe", "diskpart.exe"
+            "bcdboot.exe", "bootsect.exe", "diskpart.exe"
         };
 
         /// <summary>按 PE 自己的架构选目录：32 位 PE 跑不了 x64 exe。</summary>

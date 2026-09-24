@@ -6,11 +6,14 @@ using System.Text;
 namespace EpsBootRepair
 {
     /// <summary>
-    /// 重建 ESP 里的引导文件。BCD 和 EFI 文件一律不自己实现，全交给系统原生命令：
+    /// 重建引导文件。BCD 和引导文件一律不自己实现，全交给系统原生命令；
+    /// 走哪条路由**目标磁盘的分区表**决定，与当前 PE 是 UEFI 还是 BIOS 起的无关：
     ///
-    ///     bcdboot &lt;系统分区&gt;\Windows /s &lt;ESP&gt; /f UEFI
+    ///     GPT/UEFI   bcdboot &lt;系统分区&gt;\Windows /s &lt;ESP&gt; /f UEFI
+    ///     MBR/Legacy bcdboot &lt;系统分区&gt;\Windows /s &lt;活动主分区&gt; /f BIOS
+    ///                bootsect /nt60 &lt;活动主分区&gt; /mbr
     ///
-    /// 这一条就把 ESP 该有的东西全铺回去：\EFI\Boot\bootx64.efi、
+    /// GPT 那条把 ESP 该有的东西全铺回去：\EFI\Boot\bootx64.efi、
     /// \EFI\Microsoft\Boot\bootmgfw.efi、bootmgr.efi、字体和 BCD。
     /// ESP 被整个清空过也一样 —— 缺什么它补什么。
     /// </summary>
@@ -22,10 +25,10 @@ namespace EpsBootRepair
         readonly string _baseDir;
         readonly Action<string, LogKind> _log;
         readonly Func<VolumeInfo> _sys;
-        readonly Func<VolumeInfo> _esp;
+        readonly Func<VolumeInfo> _target;
 
         public Repair(Runner run, ToolSet tools, AppConfig cfg, string baseDir,
-                      Action<string, LogKind> log, Func<VolumeInfo> sys, Func<VolumeInfo> esp)
+                      Action<string, LogKind> log, Func<VolumeInfo> sys, Func<VolumeInfo> target)
         {
             _run = run;
             _tools = tools;
@@ -33,11 +36,16 @@ namespace EpsBootRepair
             _baseDir = baseDir;
             _log = log;
             _sys = sys;
-            _esp = esp;
+            _target = target;
         }
 
         // ------------------------------------------------------------------ 入口
 
+        /// <summary>
+        /// 该不该写 BIOS 引导代码，只看**目标那块盘的分区表**：GPT 走 UEFI/ESP 那条，
+        /// MBR 走 Legacy/活动主分区那条。跟"当前这个 PE 是 UEFI 还是 BIOS 起的"无关 ——
+        /// 用 UEFI 的 PE 去修一块死掉的 Legacy 盘是常规操作。
+        /// </summary>
         public bool DoRepair()
         {
             VolumeInfo sys = _sys();
@@ -47,13 +55,21 @@ namespace EpsBootRepair
                 return false;
             }
 
-            VolumeInfo esp = _esp();
-            if (esp == null)
+            bool legacy = sys.Style == DiskStyle.Mbr;
+
+            VolumeInfo target = _target();
+            if (target == null)
             {
-                _log(Lang.T("Error.NoEspOnDisk", sys.DiskNumber), LogKind.Error);
+                _log(Lang.T(legacy ? "Error.NoBootPartition" : "Error.NoEspOnDisk", sys.DiskNumber), LogKind.Error);
                 return false;
             }
 
+            return legacy ? DoRepairLegacy(sys, target) : DoRepairUefi(sys, target);
+        }
+
+        /// <summary>UEFI/GPT：重铺 ESP。见类注释。</summary>
+        bool DoRepairUefi(VolumeInfo sys, VolumeInfo esp)
+        {
             _log(Lang.T("Log.EspFound", esp.HasLetter ? esp.DriveLetter + ":" : Fmt.Size(esp.Size),
                         esp.DiskNumber, esp.PartitionNumber), LogKind.Info);
 
@@ -78,6 +94,58 @@ namespace EpsBootRepair
 
             _log(Lang.T("Log.Finished", rc == 0 ? 0 : 1), rc == 0 ? LogKind.Ok : LogKind.Error);
             return rc == 0;
+        }
+
+        /// <summary>
+        /// Legacy/MBR：没有 ESP，引导文件住在该磁盘的**活动主分区**上（单分区安装时就是
+        /// Windows 分区自己）。两条命令，都不依赖任何服务（bootsect 是个纯 PE，bcdboot 也是）：
+        ///
+        ///     bcdboot &lt;系统分区&gt;\Windows /s &lt;引导分区&gt; /f BIOS   铺 \bootmgr、\Boot\BCD、字体
+        ///     bootsect /nt60 &lt;引导分区&gt; /mbr                    引导代码写进它的 VBR 和磁盘的 MBR
+        ///
+        /// bcdboot 在前：它得先读目标分区的文件系统；bootsect 只写引导代码、不碰文件，放后面收尾。
+        /// 活动标记本工具只读不写 —— 标错或没标属于另一种故障，不在本工具范围内。
+        /// </summary>
+        bool DoRepairLegacy(VolumeInfo sys, VolumeInfo boot)
+        {
+            _log(Lang.T("Log.BootPartFound", boot.HasLetter ? boot.DriveLetter + ":" : Fmt.Size(boot.Size),
+                        boot.DiskNumber, boot.PartitionNumber), LogKind.Info);
+
+            string sysArg = EnsureLetter(sys, false);
+            if (sysArg == null) return false;
+            string bootArg = EnsureLetter(boot, false);
+            if (bootArg == null) return false;
+
+            string bcdboot = Exe("bcdboot.exe");
+            if (bcdboot == null) return false;
+            string bootsect = Exe("bootsect.exe");
+            if (bootsect == null) return false;
+
+            WarnNoSource(sys);
+
+            _log(Lang.T("Log.Running", "bcdboot /f BIOS"), LogKind.Command);
+            int rc = _run.Run(bcdboot, "\"" + sysArg + "\\Windows\" /s " + bootArg + " /f BIOS",
+                              _baseDir, null, 180000);
+            if (rc != 0)
+            {
+                _log(Lang.T("Error.CommandFailed", rc, "bcdboot"), LogKind.Error);
+                NoteBcdbootFailure(rc);
+                // 引导文件都没铺成，再往 MBR 写引导代码没有意义（它要加载的 bootmgr 根本不在）
+                _log(Lang.T("Log.Finished", 1), LogKind.Error);
+                return false;
+            }
+
+            _log(Lang.T("Log.Running", "bootsect /nt60 /mbr"), LogKind.Command);
+            int rc2 = _run.Run(bootsect, "/nt60 " + bootArg + " /mbr", _baseDir, null, 60000);
+            if (rc2 != 0)
+            {
+                _log(Lang.T("Error.CommandFailed", rc2, "bootsect"), LogKind.Error);
+                _log(Lang.T("Log.Finished", 1), LogKind.Error);
+                return false;
+            }
+
+            _log(Lang.T("Log.Finished", 0), LogKind.Ok);
+            return true;
         }
 
         // ------------------------------------------------------------------ 诊断

@@ -10,8 +10,9 @@ using System.Windows.Forms;
 namespace EpsBootRepair
 {
     /// <summary>
-    /// 界面只有一件事：选 Windows 系统分区 → 点一键修复 → ESP 里的引导文件重建完。
-    /// ESP 不用用户挑，从所选分区那块盘上自动认（一块盘正常只有一个 ESP）。
+    /// 界面只有一件事：选 Windows 系统分区 → 点一键修复 → 引导文件重建完。
+    /// 写到哪儿不用用户挑，从所选分区那块盘上自动认：GPT 认 ESP，MBR 认活动主分区
+    /// （一块盘正常各只有一个；多于一个就不猜，修复按钮保持禁用）。
     /// </summary>
     public sealed class MainForm : Form
     {
@@ -29,10 +30,11 @@ namespace EpsBootRepair
 
         readonly RichTextBox _log = new RichTextBox();
         readonly ComboBox _cmb = new ComboBox();
-        readonly Label _lblEsp = new Label();
+        readonly Label _lblTarget = new Label();   // 写入目标：GPT 是 ESP，MBR 是活动主分区
         readonly Label _warn = new Label();
         readonly Label _status = new Label();
         readonly Label _version = new Label();
+        Label _lblTargetCap;                       // 目标那一行的说明文字，措辞随模式换
 
         Button _btnRefresh, _btnRepair, _btnOpenLog;
 
@@ -106,15 +108,16 @@ namespace EpsBootRepair
             _cmb.SelectedIndexChanged += OnComboChanged;
             env.Controls.Add(_cmb);
 
-            env.Controls.Add(Theme.Caption(Lang.T("Main.EspLabel"), 14, 84));
+            _lblTargetCap = Theme.Caption(Lang.T("Main.EspLabel"), 14, 84);
+            env.Controls.Add(_lblTargetCap);
 
-            _lblEsp.Text = "-";
-            _lblEsp.Location = new Point(14, 102);
-            _lblEsp.AutoSize = true;
-            _lblEsp.ForeColor = Theme.Muted;
-            _lblEsp.Font = Theme.Big;
-            _lblEsp.BackColor = Color.Transparent;
-            env.Controls.Add(_lblEsp);
+            _lblTarget.Text = "-";
+            _lblTarget.Location = new Point(14, 102);
+            _lblTarget.AutoSize = true;
+            _lblTarget.ForeColor = Theme.Muted;
+            _lblTarget.Font = Theme.Big;
+            _lblTarget.BackColor = Color.Transparent;
+            env.Controls.Add(_lblTarget);
 
             // ---------------- 左：操作
             Panel act = Theme.Card(Lang.T("Main.ActionLabel"), 10, 168, 590, 140);
@@ -279,6 +282,37 @@ namespace EpsBootRepair
             return offDisk.Count == 1 ? offDisk[0] : null;
         }
 
+        /// <summary>
+        /// MBR 要写入的"引导分区"＝同一块盘上的活动主分区（MS 说的 system partition），
+        /// 单分区安装时它就是 Windows 分区自己。这是 EspFor 的对称物，纪律一样：
+        /// 恰好一个就用它；多于一个 —— 不猜，返回 null 让修复按钮保持禁用。
+        ///
+        /// 一个都没有时不返回 null，而是退回 sys 自己并把 noActive 报出去：这种情况下
+        /// 文件照样铺得进去，但 Legacy 引导要求那个分区带活动标记，而本工具不写分区表
+        /// （改分区表是另一个风险等级），所以只能给一条橙色警告说清后果，不拦 ——
+        /// 跟"所选分区里没有 Windows\System32 只警告不拦"是同一条既定方针。
+        /// </summary>
+        VolumeInfo BootPartFor(VolumeInfo sys, out bool noActive)
+        {
+            noActive = false;
+            if (sys == null) return null;
+
+            var active = new List<VolumeInfo>();
+            foreach (VolumeInfo v in _vols)
+            {
+                if (v.DiskNumber != sys.DiskNumber) continue;
+                if (v.Style != DiskStyle.Mbr) continue;
+                if (!v.IsActive) continue;
+                active.Add(v);
+            }
+
+            if (active.Count == 1) return active[0];      // 常常就是 sys 自己
+            if (active.Count > 1) return null;            // 标了两个以上：不猜
+
+            noActive = true;
+            return sys;
+        }
+
         VolumeInfo Selected()
         {
             var it = _cmb.SelectedItem as Item;
@@ -296,27 +330,42 @@ namespace EpsBootRepair
         void UpdateState()
         {
             VolumeInfo v = Selected();
-            VolumeInfo esp = EspFor(v);
             bool haveSys = v != null;
+            bool legacy = haveSys && v.Style == DiskStyle.Mbr;
+
+            VolumeInfo target = null;
+            bool noActive = false;
+            if (haveSys)
+                target = legacy ? BootPartFor(v, out noActive) : EspFor(v);
+
             bool pickedEsp = haveSys && v.IsEsp();
 
-            if (esp != null)
+            _lblTargetCap.Text = Lang.T(legacy ? "Main.BootLabel" : "Main.EspLabel");
+
+            if (target != null)
             {
-                _lblEsp.Text = Lang.T("Main.EspLine", esp.DiskNumber, esp.PartitionNumber,
-                                      esp.HasLetter ? esp.DriveLetter + ":" : Fmt.Size(esp.Size));
-                _lblEsp.ForeColor = Theme.Green;
+                _lblTarget.Text = Lang.T(legacy ? "Main.BootLine" : "Main.EspLine", target.DiskNumber,
+                                         target.PartitionNumber,
+                                         target.HasLetter ? target.DriveLetter + ":" : Fmt.Size(target.Size));
+                _lblTarget.ForeColor = Theme.Green;
             }
             else
             {
-                _lblEsp.Text = haveSys ? Lang.T("Main.EspNone") : "-";
-                _lblEsp.ForeColor = haveSys ? Theme.Orange : Theme.Muted;
+                _lblTarget.Text = haveSys ? Lang.T(legacy ? "Main.BootNone" : "Main.EspNone") : "-";
+                _lblTarget.ForeColor = haveSys ? Theme.Orange : Theme.Muted;
             }
 
             if (!haveSys)
                 Warn(Lang.T("Main.NoSelection"), Theme.Muted);
             else if (pickedEsp)
                 Warn(Lang.T("Warning.SelectedEsp"), Theme.Red);
-            else if (esp == null)
+            else if (legacy && target == null)
+                // 活动主分区多于一个：不猜，禁用
+                Warn(Lang.T("Warning.MultipleActivePartition"), Theme.Red);
+            else if (legacy && noActive)
+                // 不拦，只是说清楚后果：活动标记本工具不写，文件铺完也可能开不了机
+                Warn(Lang.T("Warning.NoActivePartition"), Theme.Orange);
+            else if (!legacy && target == null)
                 Warn(Lang.T("Warning.NoEsp"), Theme.Red);
             else if (!v.HasWindows)
                 // 不拦，只是说清楚后果：bcdboot 要拿这个分区当源，里头没有 Windows
@@ -325,10 +374,13 @@ namespace EpsBootRepair
             else
                 Warn(Lang.T("Warning.Ok"), Theme.Green);
 
-            bool tools = _tools != null && _tools.Get("bcdboot.exe") != null;
+            // Legacy 额外要 bootsect 写引导代码，缺它修不完整
+            bool tools = _tools != null && _tools.Get("bcdboot.exe") != null
+                         && (!legacy || _tools.Get("bootsect.exe") != null);
             _btnRefresh.Enabled = !_busy;
             _btnOpenLog.Enabled = !_busy;
-            _btnRepair.Enabled = !_busy && haveSys && !pickedEsp && esp != null && tools;
+            _btnRepair.Text = Lang.T(legacy ? "Button.RepairMbr" : "Button.Repair");
+            _btnRepair.Enabled = !_busy && haveSys && !pickedEsp && target != null && tools;
 
             _status.Text = _busy ? Lang.T("Status.Working") : Lang.T("Status.Ready");
         }
@@ -348,18 +400,28 @@ namespace EpsBootRepair
 
         void OnRepair(object sender, EventArgs e)
         {
-            if (Selected() == null)
+            VolumeInfo sys = Selected();
+            if (sys == null)
             {
                 MessageBox.Show(this, Lang.T("Error.NoSystemPartition"), Lang.T("App.Title"),
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            if (MessageBox.Show(this, Lang.T("Confirm.Destructive"), Lang.T("App.Title"),
+
+            bool legacy = sys.Style == DiskStyle.Mbr;
+            if (MessageBox.Show(this, Lang.T(legacy ? "Confirm.DestructiveMbr" : "Confirm.Destructive"),
+                                Lang.T("App.Title"),
                                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
                 return;
 
             Repair rep = new Repair(_run, _tools, _cfg, _baseDir, Log, Selected,
-                                    delegate { return EspFor(Selected()); });
+                                    delegate
+                                    {
+                                        VolumeInfo s = Selected();
+                                        if (s == null) return null;
+                                        bool noActive;
+                                        return s.Style == DiskStyle.Mbr ? BootPartFor(s, out noActive) : EspFor(s);
+                                    });
             Busy(delegate { return rep.DoRepair(); }, true, true);
         }
 

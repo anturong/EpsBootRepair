@@ -22,6 +22,7 @@ namespace EpsBootRepair
         public DiskStyle Style = DiskStyle.Unknown;
         public Guid GptType;
         public byte MbrType;
+        public bool IsActive;              // 仅 MBR 有意义：分区表首字节的 BootIndicator（0x80）
         public string GptName = "";
         public int DriveType = -1;         // GetDriveType 结果；-1 = 没取到
 
@@ -232,6 +233,7 @@ namespace EpsBootRepair
                 {
                     v.Style = DiskStyle.Mbr;
                     v.MbrType = buf[32];
+                    v.IsActive = buf[33] != 0;
                 }
             }
 
