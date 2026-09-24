@@ -1,0 +1,54 @@
+EPS 引导修复工具 —— 内置工具来源登记
+生成日期: 2026-09-24
+用途: 对应方案第七节。任何一份 exe 出问题，靠这张表回溯到具体来源。
+
+【只保留两颗】
+  工具只做一件事：往 ESP 里铺引导文件。要跑的因此只有 bcdboot 一条命令，
+  外加 diskpart 作为"分配盘符失败"的回退。其余一律不进包：
+
+    bcdboot.exe   写 \EFI\Boot\bootx64.efi、\EFI\Microsoft\Boot\bootmgfw.efi、BCD —— 正面主角
+    diskpart.exe  仅当 SetVolumeMountPoint 挂盘符失败时才用（回退路径）
+
+  已移除（各附原因，别再加回来除非需求变了）：
+    BootRec.exe                   只用来补扫别的 Windows 安装，属于可砍环节；且它导入
+                                  wer.dll，精简 PE 的 wer.dll 缺导出 → 进程进不了 main
+                                  就 0xC0000139 退出、零输出
+    bcdedit.exe                   写/删固件(NVRAM)启动项用；那是另一个场景（文件没丢、
+                                  只是启动项丢了），本工具不覆盖
+    bootsect.exe                  写 MBR + 分区引导扇区用，那是 Legacy/BIOS 引导；
+                                  本工具只管 UEFI 的 ESP
+    DiagnosticDataSettings.dll    当初是为让 BootRec.exe 在精简 PE 里加载起来补的依赖，
+                                  BootRec 一走它就没有存在理由
+
+【x64】来源镜像
+  D:\我的备份文件\zh-cn_windows_10_business_editions_version_22h2_updated_oct_2025_x64_dvd_d4e92df7.iso
+    -> sources\boot.wim  索引 1  "Microsoft Windows PE (amd64)"  镜像版本 10.0.19041.3636
+    官方原版 Windows 10 22H2 x64 DVD
+
+  文件名        架构  字节数   md5
+  bcdboot.exe   x64   259584   ccf7583912635e30ebcc20012c30eb1e
+  diskpart.exe  x64   159232   10a9693cfe404504890da7f7e2fded13
+
+【x86】来源镜像
+  D:\RAID_NAS备份\系统备份\启动盘Ventoy\EasyU_v3.7.iso
+    -> BOOT\10PEx86.wim  索引 1  32 位 Win10 PE
+
+  文件名        架构  字节数   md5
+  bcdboot.exe   x86   200704   af770703cc056d74ee3149099fbdcad1
+  diskpart.exe  x86   150528   399d6f0d3dae925da5fd614826ef36f4
+
+【内嵌文件版本】(读自 tools\ 下的副本；为什么和挂载 WIM 里读到的不一样见末尾备忘)
+  x64  bcdboot  10.0.19041.5438 (WinBuild.160101.0800)
+  x64  diskpart 10.0.19041.3636 (WinBuild.160101.0800)
+  x86  两颗均 10.0.19041.1      (WinBuild.160101.0800)
+
+【许可 / 不要提交进仓库】
+  微软的 exe 不可再分发。自用或内部做 PE 盘无所谓；若要公开到 GitHub，
+  把 tools\ 写进 .gitignore，改为首次运行时从 %SystemRoot%\System32 或随附的 PE 镜像里拷。
+
+【实测备忘】
+  1. 版本号会因 .mui 而变。在挂载的 WIM 里读 FileVersion 得到的是本地化 .mui 的值
+     （如 bcdboot 报 10.0.19041.4355），拷出来脱离 .mui 后读到的是 exe 内嵌值
+     （10.0.19041.5438）。两者 md5 完全一致，所以一律以 md5 为准。
+     同理：想让工具自身输出保持本地化，需要一并带上 <语言>\xxx.exe.mui。
+  2. 两张 x64 盘都不含 32 位工具，x86 那套只能从 32 位 PE 里取（本表取自 EasyU 的 10PEx86.wim）。

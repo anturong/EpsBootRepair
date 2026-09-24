@@ -1,0 +1,16 @@
+# 构建产物
+bin/
+obj/
+
+# 运行时日志（config.ini 的 [Log] Dir 留空时会落在 exe 目录的 logs\）
+logs/
+
+# 微软的 exe 不可再分发，见 tools/SOURCE.txt 末尾。保留 SOURCE.txt 这张来源登记表，
+# 只把二进制排除；首次运行从 %SystemRoot%\System32 或随附的 PE 镜像里拷。
+tools/x64/*.exe
+tools/x86/*.exe
+
+# 编辑器
+.vs/
+*.user
+*.suo
