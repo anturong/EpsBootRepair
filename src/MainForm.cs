@@ -36,7 +36,7 @@ namespace EpsBootRepair
         readonly Label _version = new Label();
         Label _lblTargetCap;                       // 目标那一行的说明文字，措辞随模式换
 
-        Button _btnRefresh, _btnRepair, _btnOpenLog;
+        Button _btnRefresh, _btnRepair, _btnOpenLog, _btnAdvanced;
 
         public MainForm(AppConfig cfg)
         {
@@ -122,12 +122,15 @@ namespace EpsBootRepair
             // ---------------- 左：操作
             Panel act = Theme.Card(Lang.T("Main.ActionLabel"), 10, 168, 590, 140);
 
-            _btnRefresh = Theme.Btn(Lang.T("Button.Refresh"), 14, 44, 270, 34, Theme.BtnBg, Theme.Fg, OnRefresh);
-            _btnOpenLog = Theme.Btn(Lang.T("Button.OpenLog"), 306, 44, 270, 34, Theme.BtnBg, Theme.Fg, OnOpenLog);
+            _btnRefresh = Theme.Btn(Lang.T("Button.Refresh"), 14, 44, 178, 34, Theme.BtnBg, Theme.Fg, OnRefresh);
+            _btnOpenLog = Theme.Btn(Lang.T("Button.OpenLog"), 196, 44, 178, 34, Theme.BtnBg, Theme.Fg, OnOpenLog);
+            _btnAdvanced = Theme.Btn(Lang.T("Button.Advanced"), 378, 44, 178, 34, Theme.BtnBg, Theme.Fg, OnAdvanced);
+            // 修复按钮保持 562x40 不动：自动化 harness 靠"宽 >=500 且高 >=38"认它
             _btnRepair = Theme.Btn(Lang.T("Button.Repair"), 14, 88, 562, 40, Theme.Green, Theme.Dark, OnRepair);
 
             act.Controls.Add(_btnRefresh);
             act.Controls.Add(_btnOpenLog);
+            act.Controls.Add(_btnAdvanced);
             act.Controls.Add(_btnRepair);
 
             // ---------------- 左：警告
@@ -231,7 +234,8 @@ namespace EpsBootRepair
                 if (v.IsEsp()) continue;
 
                 string mid = v.HasLetter ? v.DriveLetter + ":" : v.FileSystem;
-                _cmb.Items.Add(new Item(v, Lang.T("Partition.ListRow", v.DiskNumber, v.PartitionNumber, mid, Fmt.Size(v.Size))));
+                _cmb.Items.Add(new Item(v, Lang.T("Partition.ListRow", v.DiskNumber, Disks.ModelOf(v),
+                                                 Fmt.DiskSize(v.DiskSize), v.PartitionNumber, mid, Fmt.Size(v.Size))));
             }
 
             int restore = -1, withWin = -1, winCount = 0;
@@ -344,9 +348,10 @@ namespace EpsBootRepair
 
             if (target != null)
             {
+                // 除盘号外把型号和整盘容量也带上：光一个"磁盘 0"认不出是哪块盘，型号才对得上手里的硬盘
                 _lblTarget.Text = Lang.T(legacy ? "Main.BootLine" : "Main.EspLine", target.DiskNumber,
-                                         target.PartitionNumber,
-                                         target.HasLetter ? target.DriveLetter + ":" : Fmt.Size(target.Size));
+                                         Disks.ModelOf(target), Fmt.DiskSize(target.DiskSize),
+                                         Lang.T(legacy ? "Disk.KindMbr" : "Disk.KindEsp"));
                 _lblTarget.ForeColor = Theme.Green;
             }
             else
@@ -381,6 +386,9 @@ namespace EpsBootRepair
             _btnOpenLog.Enabled = !_busy;
             _btnRepair.Text = Lang.T(legacy ? "Button.RepairMbr" : "Button.Repair");
             _btnRepair.Enabled = !_busy && haveSys && !pickedEsp && target != null && tools;
+            // 故意不依赖 haveSys / target：自动那条路挑不出目标（没有 ESP、或活动主分区
+            // 多于一个）正是这个按钮存在的理由，那时它必须还能点
+            _btnAdvanced.Enabled = !_busy && _tools != null;
 
             _status.Text = _busy ? Lang.T("Status.Working") : Lang.T("Status.Ready");
         }
@@ -422,6 +430,32 @@ namespace EpsBootRepair
                                         bool noActive;
                                         return s.Style == DiskStyle.Mbr ? BootPartFor(s, out noActive) : EspFor(s);
                                     });
+            Busy(delegate { return rep.DoRepair(); }, true, true);
+        }
+
+        /// <summary>
+        /// 高级模式：源和目标由用户在对话框里分别指定，这里只负责接线。
+        /// 走 <see cref="Repair"/> 现成的两个委托，`EspFor`/`BootPartFor` 一概不参与 ——
+        /// 这条路的意义就是绕开自动挑选。走哪条固件路仍由 Repair 按目标推导。
+        /// </summary>
+        void OnAdvanced(object sender, EventArgs e)
+        {
+            VolumeInfo sys, target;
+
+            // 现枚举一份，不用 _vols：对话框可能被用户晾着，而盘是会被插拔的
+            using (var dlg = new AdvancedForm(Volumes.Enumerate(), _tools))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                sys = dlg.Source;
+                target = dlg.Target;
+            }
+
+            Log(Lang.T("Log.AdvancedRepair", sys.Root, target.Root), LogKind.Info);
+
+            // 两道确认（含手动敲 YES）已经在对话框里过完了，这里不再拦一次
+            Repair rep = new Repair(_run, _tools, _cfg, _baseDir, Log,
+                                    delegate { return sys; },
+                                    delegate { return target; });
             Busy(delegate { return rep.DoRepair(); }, true, true);
         }
 

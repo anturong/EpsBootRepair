@@ -26,6 +26,10 @@ namespace EpsBootRepair
         public string GptName = "";
         public int DriveType = -1;         // GetDriveType 结果；-1 = 没取到
 
+        // 所属物理盘的属性（不是这个分区自己的）。一个盘上所有分区共享同一份，盘号取不到时为空。
+        public string DiskModel = "";      // 型号，如 "WDC WUS721010ALE6L4"
+        public ulong DiskSize;             // 整盘容量
+
         public bool HasLetter { get { return DriveLetter != '\0'; } }
 
         /// <summary>有盘符返回 "C:\"，没有就返回卷 GUID 路径（两者都能直接当路径用）。</summary>
@@ -91,6 +95,8 @@ namespace EpsBootRepair
         const uint OPEN_EXISTING = 3;
         const uint IOCTL_DISK_GET_PARTITION_INFO_EX = 0x00070048;
         const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
+        const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;   // PropertyId=0 StorageDeviceProperty
+        const uint IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C;     // 出参 8 字节 u64
         static readonly IntPtr InvalidHandle = new IntPtr(-1);
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -109,6 +115,11 @@ namespace EpsBootRepair
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool DeviceIoControl(IntPtr device, uint ioControlCode, IntPtr inBuffer, uint inBufferSize,
                                            byte[] outBuffer, uint outBufferSize, out uint bytesReturned, IntPtr overlapped);
+
+        // 需要真往里写结构的 IOCTL（STORAGE_PROPERTY_QUERY）走这个重载。
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "DeviceIoControl")]
+        static extern bool DeviceIoControlIn(IntPtr device, uint ioControlCode, byte[] inBuffer, uint inBufferSize,
+                                             byte[] outBuffer, uint outBufferSize, out uint bytesReturned, IntPtr overlapped);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool CloseHandle(IntPtr handle);
@@ -149,18 +160,112 @@ namespace EpsBootRepair
             IntPtr h = FindFirstVolume(sb, (uint)sb.Capacity);
             if (h == InvalidHandle || h == IntPtr.Zero) return list;
 
+            // 一个盘问一次就够，同一物理盘上所有分区共用这份型号/容量。
+            var models = new Dictionary<int, string>();
+            var sizes = new Dictionary<int, ulong>();
+
             try
             {
                 while (true)
                 {
                     VolumeInfo v = Describe(sb.ToString());
-                    if (v != null) list.Add(v);
+                    if (v != null)
+                    {
+                        if (v.DiskNumber >= 0)
+                        {
+                            if (!models.ContainsKey(v.DiskNumber))
+                            {
+                                string m; ulong s;
+                                QueryDisk(v.DiskNumber, out m, out s);
+                                models[v.DiskNumber] = m;
+                                sizes[v.DiskNumber] = s;
+                            }
+                            v.DiskModel = models[v.DiskNumber];
+                            v.DiskSize = sizes[v.DiskNumber];
+                        }
+                        list.Add(v);
+                    }
                     sb.Length = 0;
                     if (!FindNextVolume(h, sb, (uint)sb.Capacity)) break;
                 }
             }
             finally { FindVolumeClose(h); }
             return list;
+        }
+
+        /// <summary>
+        /// 问一块物理盘的型号和整盘容量。走 STORAGE_DEVICE_DESCRIPTOR（不是 WMI）。
+        /// 型号 = VendorId + ProductId 直接相接 —— 用户给的样例就是这个口径
+        /// （"WDC"+"WDS500G2B0A-00SM50" → WDCWDS500G2B0A-00SM50）。
+        /// 盘号 &lt; 0 或打不开就返回 false（型号空、容量 0）。
+        /// </summary>
+        public static bool QueryDisk(int diskNumber, out string model, out ulong size)
+        {
+            model = "";
+            size = 0;
+            if (diskNumber < 0) return false;
+
+            string dev = @"\\.\PhysicalDrive" + diskNumber;
+            IntPtr h = CreateFile(dev, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (h == InvalidHandle) h = CreateFile(dev, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (h == InvalidHandle) return false;
+
+            bool any = false;
+            try
+            {
+                uint ret;
+                var query = new byte[12];              // STORAGE_PROPERTY_QUERY：PropertyId=0 + QueryType=0 + 1 字节占位
+                var desc = new byte[1024];             // STORAGE_DEVICE_DESCRIPTOR + 字符串池
+                if (DeviceIoControlIn(h, IOCTL_STORAGE_QUERY_PROPERTY, query, (uint)query.Length, desc, (uint)desc.Length, out ret, IntPtr.Zero)
+                    && ret >= 36)
+                {
+                    string vendor = AsciiAt(desc, BitConverter.ToInt32(desc, 12));
+                    string product = AsciiAt(desc, BitConverter.ToInt32(desc, 16));
+                    // 固件的 VendorId 常带补位空格（"WDC "），直接相接会出双空格
+                    model = Collapse(vendor + " " + product);
+                    any = true;
+                }
+
+                var len = new byte[8];
+                if (DeviceIoControl(h, IOCTL_DISK_GET_LENGTH_INFO, IntPtr.Zero, 0, len, (uint)len.Length, out ret, IntPtr.Zero)
+                    && ret >= 8)
+                {
+                    size = BitConverter.ToUInt64(len, 0);
+                    any = true;
+                }
+            }
+            finally { CloseHandle(h); }
+            return any;
+        }
+
+        /// <summary>把连续空白压成一个空格，并去掉首尾 —— 固件里的型号是定长字段，补位空格很多。</summary>
+        static string Collapse(string s)
+        {
+            var sb = new StringBuilder(s == null ? 0 : s.Length);
+            bool gap = false;
+            foreach (char c in s ?? "")
+            {
+                if (c == ' ' || c == '\t')
+                {
+                    gap = true;
+                    continue;
+                }
+                if (gap && sb.Length > 0) sb.Append(' ');
+                gap = false;
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>读 STORAGE_DEVICE_DESCRIPTOR 里某个偏移上的 NUL 结尾 ASCII 串。偏移 0 或越界当没有。</summary>
+        static string AsciiAt(byte[] buf, int off)
+        {
+            if (off <= 0 || off >= buf.Length) return "";
+            int end = off;
+            while (end < buf.Length && buf[end] != 0) end++;
+            var sb = new StringBuilder(end - off);
+            for (int i = off; i < end; i++) sb.Append((char)buf[i]);
+            return sb.ToString().Trim();
         }
 
         static VolumeInfo Describe(string volumePath)
@@ -316,6 +421,19 @@ namespace EpsBootRepair
             if (b >= 1024.0 * 1024 * 1024) return (b / (1024.0 * 1024 * 1024)).ToString("0.#") + " GB";
             if (b >= 1024.0 * 1024) return (b / (1024.0 * 1024)).ToString("0.#") + " MB";
             return (b / 1024.0).ToString("0.#") + " KB";
+        }
+
+        /// <summary>
+        /// 整盘容量的显示口径：整数、向上取整、单位紧贴数字（"9314GB" / "466GB" / "500MB"）。
+        /// 用户给的盘列表样例就长这样。1 GiB 以下退到 MB。
+        /// </summary>
+        public static string DiskSize(ulong bytes)
+        {
+            if (bytes == 0) return "-";
+            double gb = bytes / (1024.0 * 1024 * 1024);
+            if (gb >= 1.0) return Math.Ceiling(gb).ToString("0") + "GB";
+            double mb = bytes / (1024.0 * 1024);
+            return Math.Max(1, Math.Ceiling(mb)).ToString("0") + "MB";
         }
     }
 }

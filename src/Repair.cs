@@ -55,16 +55,53 @@ namespace EpsBootRepair
                 return false;
             }
 
-            bool legacy = sys.Style == DiskStyle.Mbr;
-
             VolumeInfo target = _target();
             if (target == null)
             {
-                _log(Lang.T(legacy ? "Error.NoBootPartition" : "Error.NoEspOnDisk", sys.DiskNumber), LogKind.Error);
+                // 目标都没定下来，只能按源那块盘的分区表选一句措辞
+                bool sysLegacy = sys.Style == DiskStyle.Mbr;
+                _log(Lang.T(sysLegacy ? "Error.NoBootPartition" : "Error.NoEspOnDisk", sys.DiskNumber),
+                     LogKind.Error);
                 return false;
             }
 
-            return legacy ? DoRepairLegacy(sys, target) : DoRepairUefi(sys, target);
+            return IsLegacyTarget(target) ? DoRepairLegacy(sys, target) : DoRepairUefi(sys, target);
+        }
+
+        /// <summary>
+        /// 走 BIOS 那条路，当且仅当目标是**非 ESP 的 MBR 分区**。源和目标是两块盘上也一样，
+        /// 判据只看目标 —— UEFI 要的是 ESP，跟它挂在哪块盘无关。
+        ///
+        /// 不能只判 <c>target.Style == Mbr</c>：EspFor 的跨盘兜底不筛分区表类型，一个 MBR 分区
+        /// 只要类型是 0xEF、或含 EFI\Microsoft\Boot，<c>IsEsp()</c> 就为真（见 VolumeInfo.IsEsp）。
+        /// 那种目标必须走 UEFI，否则会把一条本来正确的修复切成 /f BIOS + bootsect。
+        ///
+        /// 反方向不存在歧义：GPT 的保护 MBR 里写不进引导代码，所以 GPT 上非 ESP 的分区
+        /// 不能当 BIOS 目标，高级窗口的候选里也不会出现它。
+        /// </summary>
+        public static bool IsLegacyTarget(VolumeInfo target)
+        {
+            return target.Style == DiskStyle.Mbr && !target.IsEsp();
+        }
+
+        // ------------------------------------------------------------------ 命令行
+
+        // 命令行只在这里拼一次：真正执行的和高级窗口预览的必须是同一个串。
+        // sysArg / targetArg 形如 "V:"（带冒号），高级窗口在盘符还没分配时会用占位符顶替。
+
+        public static string UefiArgs(string sysArg, string targetArg)
+        {
+            return "\"" + sysArg + "\\Windows\" /s " + targetArg + " /f UEFI";
+        }
+
+        public static string BcdBiosArgs(string sysArg, string targetArg)
+        {
+            return "\"" + sysArg + "\\Windows\" /s " + targetArg + " /f BIOS";
+        }
+
+        public static string BootsectArgs(string targetArg)
+        {
+            return "/nt60 " + targetArg + " /mbr";
         }
 
         /// <summary>UEFI/GPT：重铺 ESP。见类注释。</summary>
@@ -84,8 +121,7 @@ namespace EpsBootRepair
             WarnNoSource(sys);
 
             _log(Lang.T("Log.Running", "bcdboot /f UEFI"), LogKind.Command);
-            int rc = _run.Run(bcdboot, "\"" + sysArg + "\\Windows\" /s " + espArg + " /f UEFI",
-                              _baseDir, null, 180000);
+            int rc = _run.Run(bcdboot, UefiArgs(sysArg, espArg), _baseDir, null, 180000);
             if (rc != 0)
             {
                 _log(Lang.T("Error.CommandFailed", rc, "bcdboot"), LogKind.Error);
@@ -124,8 +160,7 @@ namespace EpsBootRepair
             WarnNoSource(sys);
 
             _log(Lang.T("Log.Running", "bcdboot /f BIOS"), LogKind.Command);
-            int rc = _run.Run(bcdboot, "\"" + sysArg + "\\Windows\" /s " + bootArg + " /f BIOS",
-                              _baseDir, null, 180000);
+            int rc = _run.Run(bcdboot, BcdBiosArgs(sysArg, bootArg), _baseDir, null, 180000);
             if (rc != 0)
             {
                 _log(Lang.T("Error.CommandFailed", rc, "bcdboot"), LogKind.Error);
@@ -136,7 +171,7 @@ namespace EpsBootRepair
             }
 
             _log(Lang.T("Log.Running", "bootsect /nt60 /mbr"), LogKind.Command);
-            int rc2 = _run.Run(bootsect, "/nt60 " + bootArg + " /mbr", _baseDir, null, 60000);
+            int rc2 = _run.Run(bootsect, BootsectArgs(bootArg), _baseDir, null, 60000);
             if (rc2 != 0)
             {
                 _log(Lang.T("Error.CommandFailed", rc2, "bootsect"), LogKind.Error);
